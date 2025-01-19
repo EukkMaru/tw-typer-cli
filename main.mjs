@@ -10,6 +10,7 @@ const conversionTable = new Map([
     [/[()]/g, '{par}'],
     [/-/g, '\u2014'],
     [/\.\.\./g, '{elp}'],
+    [/⋯/g, '{elpC}'],
     [/\u2661/g, '{hrt}'],
     [/\"/g, '{quo}'],
         [/,/g, '{com}'],
@@ -19,7 +20,7 @@ const conversionTable = new Map([
     ]);
 
 function replacePerm(text) {
-    text = text.replace(/hh/g, '\u2661').replace(/-/g, '\u2014');
+    text = text.replace(/hh/g, '\u2661').replace(/-/g, '\u2014').replace(/\.\.\./g, '⋯');
     return text;
 }
 
