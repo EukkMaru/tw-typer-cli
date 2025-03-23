@@ -5,7 +5,7 @@ import clipboardy from 'clipboardy';
 
 // Conversion table as a Map
 const conversionTable = new Map([
-    [/[\uAC00-\uD7AF]/g, (match) => String.fromCharCode(0x4DC0 + (match.charCodeAt(0) % (0x4DFF - 0x4DC0))) + '\u2590'],
+    [/[\uAC00-\uD7AF]/g, (match) => String.fromCodePoint(0x10C80 + (match.charCodeAt(0) % (0x10CB2 - 0x10C80))) + '\u2590'],
     [/[\u3130-\u318F\u1100-\u11FF]/g, '\uFE57'],
     [/[()]/g, '{par}'],
     [/-/g, '\u2014'],
@@ -13,10 +13,10 @@ const conversionTable = new Map([
     [/⋯/g, '{elpC}'],
     [/\u2661/g, '{hrt}'],
     [/\"/g, '{quo}'],
-        [/,/g, '{com}'],
-        [/!/g, '{exc}'],
-        [/\?/g, '{que}'],
-        [/\./g, '{per}']
+    [/,/g, '{com}'],
+    [/!/g, '{exc}'],
+    [/\?/g, '{que}'],
+    [/\./g, '{per}']
     ]);
 
 function replacePerm(text) {
@@ -53,8 +53,8 @@ console.log("Start typing (press 'Ctrl+C' to quit, ':copy' / ':cut' to copy orig
 
 function updateDisplay() {
     console.clear();
-    console.log(`Obfuscated Text:\n${obfuscatedText}`);
-    console.log(`Total Characters: ${calculateTotalChars(originalText)}`);
+    console.log(`Cipher:\n${obfuscatedText}`);
+    console.log(`Total Char: ${calculateTotalChars(originalText)}`);
 }
 
 process.stdin.on('keypress', (str, key) => {
