@@ -3,6 +3,16 @@
 import readline from 'readline';
 import clipboardy from 'clipboardy';
 
+const args = process.argv.slice(2);
+let midlineFlag = false;
+let warningFlag = false;
+if (args.includes('--no-midline')) {
+    midlineFlag = true;
+}
+if (args.includes('--warning')) {
+    warningFlag = true;
+}
+
 // Conversion table as a Map
 const conversionTable = new Map([
     [/[\uAC00-\uD7AF]/g, (match) => String.fromCharCode(0x4DC0 + (match.charCodeAt(0) % (0x4DFF - 0x4DC0))) + '\u2590'],
@@ -12,15 +22,18 @@ const conversionTable = new Map([
     [/\.\.\./g, '{elp}'],
     [/⋯/g, '{elpC}'],
     [/\u2661/g, '{hrt}'],
-    [/\"/g, '{quo}'],
-        [/,/g, '{com}'],
-        [/!/g, '{exc}'],
-        [/\?/g, '{que}'],
-        [/\./g, '{per}']
+    [/,/g, '{com}'],
+    [/!/g, '{exc}'],
+    [/\?/g, '{que}'],
+    [/\./g, '{per}']
     ]);
 
+// Override quote replacement based on warningFlag
+conversionTable.set(/"/g, warningFlag ? '{WARNING:Quotes}' : '{quo}');
+
 function replacePerm(text) {
-    text = text.replace(/hh/g, '\u2661').replace(/-/g, '\u2014').replace(/\.\.\./g, '⋯');
+    text = text.replace(/hh/g, '\u2661').replace(/-/g, '\u2014')
+    text = midlineFlag ? text : text.replace(/\.\.\./g, '⋯');
     return text;
 }
 
@@ -53,7 +66,9 @@ console.log("Start typing (press 'Ctrl+C' to quit, ':copy' / ':cut' to copy orig
 
 function updateDisplay() {
     console.clear();
-    console.log(`Obfuscated Text:\n${obfuscatedText}`);
+    if (midlineFlag) console.log("No midline ");
+    if (warningFlag) console.log("Quote warning ");
+    console.log(`\nObfuscated Text:\n${obfuscatedText}`);
     console.log(`Total Characters: ${calculateTotalChars(originalText)}`);
 }
 
