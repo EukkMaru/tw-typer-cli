@@ -1,3 +1,15 @@
 node_modules/
 __pycache__/
 .vscode/
+
+# AI assistant files
+.claude/
+.cursor/
+.aider*
+.continue/
+.github/copilot-instructions.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.codeium/
+.windsurf/
