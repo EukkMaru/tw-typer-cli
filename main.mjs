@@ -8,6 +8,7 @@ let midlineFlag = false;
 let warningFlag = false;
 let saveSpaceFlag = false;
 let rawFlag = false;
+let disguiseStyle = null;
 
 const flags = new Set(args);
 
@@ -15,6 +16,17 @@ midlineFlag = flags.has('--no-midline') || flags.has('-n');
 warningFlag = flags.has('--warning') || flags.has('-w');
 saveSpaceFlag = flags.has('--save-space') || flags.has('-s');
 rawFlag = flags.has('--raw') || flags.has('-r');
+
+if (flags.has('-d') || flags.has('--disguise')) {
+    const dIndex = args.indexOf('-d');
+    const longIndex = args.indexOf('--disguise');
+    const index = dIndex !== -1 ? dIndex : longIndex;
+    disguiseStyle = args[index + 1];
+    if (disguiseStyle !== 'hex') {
+        console.error("Unknown disguise style.");
+        process.exit(1);
+    }
+}
 
 if (flags.has('-p') || flags.has('--profile')) {
     const pIndex = args.indexOf('-p');
@@ -69,8 +81,29 @@ function replacePerm(text) {
     return text;
 }
 
+// Hex disguise: each codepoint -> 2-char XOR-fold of its bytes (256 buckets,
+// fewer collisions than Yijing's 63). Same input -> same output, so repeated
+// chars are still spottable. Jamo (incomplete syllables) stays loud as red XX
+// to surface typos at a glance. Newlines kept literal so layout survives.
+const JAMO_HEX = '\x1b[31mXX\x1b[39m';
+function hexEncode(text) {
+    let out = '';
+    for (const ch of text) {
+        const cp = ch.codePointAt(0);
+        if (cp === 0x0A) { out += '\n'; continue; }
+        if ((cp >= 0x1100 && cp <= 0x11FF) || (cp >= 0x3130 && cp <= 0x318F)) {
+            out += JAMO_HEX;
+            continue;
+        }
+        const folded = ((cp >> 16) & 0xFF) ^ ((cp >> 8) & 0xFF) ^ (cp & 0xFF);
+        out += folded.toString(16).padStart(2, '0').toUpperCase();
+    }
+    return out;
+}
+
 function replaceText(text) {
     text = replacePerm(text);
+    if (disguiseStyle === 'hex') return hexEncode(text);
     return Array.from(conversionTable).reduce((acc, [regex, replacement]) => acc.replace(regex, replacement), text);
 }
 
@@ -204,6 +237,7 @@ function updateDisplay() {
     if (warningFlag) flagBits.push('w');
     if (saveSpaceFlag) flagBits.push('s');
     if (rawFlag) flagBits.push('r');
+    if (disguiseStyle) flagBits.push('d');
     if (flagBits.length) console.log(`${ANSI_DIM}[${flagBits.join('')}]${ANSI_RESET}`);
     if (rawFlag) console.log(`\n${originalText}`);
     console.log(`\n${renderObfuscated(originalText, cursorPos)}`);
