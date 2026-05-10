@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-// state machine: drafting -> sanitizing -> awaiting -> reviewing -> polishing
+// AI-assisted rewrite workflow built on top of main.mjs's typer.
+// State machine: drafting -> sanitizing -> awaiting -> reviewing -> polishing -> done.
+//
+// Usage: node rewrite.mjs [main.mjs flags] [--rp]
+//   --rp    use general-RP prompt (prompt-rp.dat) instead of ERP (prompt.dat)
+//
+// Required env: ANTHROPIC_API_KEY (or .env file with dotenv)
 
 import 'dotenv/config';
 import readline from 'readline';
@@ -36,9 +42,12 @@ import {
     diffTexts,
 } from './util.mjs';
 
+// ============================================================
+// Constants
+// ============================================================
+
 const MODEL = 'claude-opus-4-7';
 const MAX_TOKENS = 4096;
-const PAIRS_PATH = 'pairs.dat';
 const ANSI_GREEN = '\x1b[32m';
 const ANSI_RED = '\x1b[31m';
 const ANSI_CYAN = '\x1b[36m';
@@ -51,6 +60,10 @@ const STATES = {
     POLISHING: 'polishing',
 };
 
+// ============================================================
+// Argument handling
+// ============================================================
+
 function parseRewriteArgs(args) {
     const isRp = args.includes('--rp');
     const isLight = args.includes('--light');
@@ -59,26 +72,38 @@ function parseRewriteArgs(args) {
     return { flags, isRp, isLight };
 }
 
-function createState() {
+// ============================================================
+// State container — holds all mutable workflow state.
+// ============================================================
+
+function createState(pairsPath = '') {
     return {
         phase: STATES.DRAFTING,
+        // Buffer being typed into (drafting/sanitizing).
         buffer: '',
         cursor: 0,
         revealing: false,
-        // locked at :submit
+        // Locked at :submit.
         original: null,
-        // locked at :send
+        // Locked at :send.
         sanitized: null,
+        // Set after API returns.
         rewriteRaw: null,
         parsed: null,
-        blocks: null,
-        rewriteSeparators: [],
+        // Polish UI state.
+        blocks: null,        // [{ original, sanitized, blockDiff, edited }]
+        rewriteSeparators: [], // captured at split for accurate stitching
         activeBlock: 0,
         editingBlock: false,
-        editCursor: 0,
-        statusLine: '',
+        editCursor: 0,       // cursor offset within active block when editing
+        statusLine: '',      // ephemeral message shown bottom of screen
+        pairsPath,           // mode-specific pairs file (set at startup)
     };
 }
+
+// ============================================================
+// Drawing — one function per phase.
+// ============================================================
 
 function clearScreen() {
     console.clear();
@@ -138,10 +163,16 @@ function drawPolishing(state) {
         console.log(`${ANSI_RED}no blocks to display${ANSI_RESET}`);
         return;
     }
-    // tuned for korean wide-chars (~17 hangul or ~36 ascii per pane)
+    // Fixed total width tuned for Korean prose: ~78 cols of monospace,
+    // halved per pane minus the divider. Korean wide-chars are 2 cells
+    // each so each pane fits ~17 Korean chars or ~36 ASCII.
     const TOTAL_WIDTH = 78;
     const colWidth = Math.floor((TOTAL_WIDTH - 5) / 2);
-    // when editing, render active block last so terminal scroll keeps it visible
+    // Iteration order: when editing, render non-active blocks first
+    // and the active block last. This puts the active block at the
+    // bottom of the output so the terminal's natural scroll behavior
+    // keeps it visible regardless of total block count or content
+    // length. When not editing, use natural document order.
     const indexOrder = state.editingBlock
         ? [
             ...state.blocks.map((_, i) => i).filter(i => i !== state.activeBlock),
@@ -156,6 +187,7 @@ function drawPolishing(state) {
         const leftPane = renderDiff(block.blockDiff, { removedColor: ANSI_RED, addedColor: ANSI_GREEN, reset: ANSI_RESET });
         let rightPane;
         if (isActive && state.editingBlock) {
+            // Render cursor at editCursor position within the block.
             const before = block.edited.slice(0, state.editCursor);
             const after = block.edited.slice(state.editCursor);
             rightPane = `${ANSI_CYAN}${before}${CURSOR_MARK}${ANSI_CYAN}${after}${ANSI_RESET}`;
@@ -172,7 +204,10 @@ function drawPolishing(state) {
     if (state.statusLine) console.log(`${ANSI_DIM}${state.statusLine}${ANSI_RESET}`);
 }
 
-// side-by-side with wrap; explicit resets prevent color bleed across wraps
+// Side-by-side rendering with line wrapping. Strips ANSI for width
+// calculation but preserves it in output. Resets explicitly before
+// the divider and at end of right content to prevent color bleed
+// across wrap boundaries.
 function printTwoColumn(left, right, colWidth) {
     const leftLines = wrapAnsi(left, colWidth);
     const rightLines = wrapAnsi(right, colWidth);
@@ -181,6 +216,8 @@ function printTwoColumn(left, right, colWidth) {
         const l = leftLines[r] || '';
         const ri = rightLines[r] || '';
         const lPad = padAnsi(l, colWidth);
+        // Explicit ANSI_RESET before the divider closes any unclosed
+        // color from the left pane. Same after the right content.
         console.log(`  ${lPad}${ANSI_RESET}  │  ${ri}${ANSI_RESET}`);
     }
 }
@@ -189,12 +226,15 @@ function stripAnsi(s) {
     return s.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
-// korean hangul / wide chars are 2 cells
+// Display width — Korean Hangul and other wide chars take 2 cells.
+// Uses string-width which handles ANSI internally.
 function visibleWidth(s) {
     return stringWidth(s);
 }
 
-// wrap by display width, preserving ansi escapes (zero-width)
+// Wrap text to max display width per line. Tracks per-character display
+// width so Korean text wraps at the right column. Preserves ANSI escapes
+// (they have width 0) without breaking them.
 function wrapAnsi(text, width) {
     if (!text) return [''];
     const lines = [];
@@ -206,11 +246,11 @@ function wrapAnsi(text, width) {
         let cur = '';
         let curWidth = 0;
         let i = 0;
-        const chars = [...para]; // unicode-safe (surrogate pairs)
+        const chars = [...para]; // proper unicode iteration (handles surrogate pairs)
         while (i < chars.length) {
             const ch = chars[i];
             if (ch === '\x1b') {
-                // collect ansi escape through 'm'
+                // ANSI escape: collect through 'm', no width contribution.
                 let escEnd = i;
                 while (escEnd < chars.length && chars[escEnd] !== 'm') escEnd++;
                 cur += chars.slice(i, escEnd + 1).join('');
@@ -238,6 +278,10 @@ function padAnsi(s, width) {
     return s + ' '.repeat(width - w);
 }
 
+// ============================================================
+// API call
+// ============================================================
+
 async function callClaude(client, systemPrompt, sanitized) {
     const wrapped = `<draft>\n${sanitized}\n</draft>\n\nPolish this draft per your instructions. Output only the structured editorial response. Do not respond as a character.`;
     const response = await client.messages.create({
@@ -252,6 +296,10 @@ async function callClaude(client, systemPrompt, sanitized) {
         .join('\n');
     return { text, response };
 }
+
+// ============================================================
+// State transitions
+// ============================================================
 
 function transitionToSanitizing(state) {
     state.original = state.buffer;
@@ -274,7 +322,7 @@ function transitionToDrafting(state) {
 }
 
 function abandon(state) {
-    // keep original; reset only the sanitization
+    // Reset clean-copy phase but keep original buffer intact.
     state.phase = STATES.SANITIZING;
     state.buffer = state.original;
     state.cursor = state.buffer.length;
@@ -293,17 +341,20 @@ function transitionToReviewing(state, parsed, rawText) {
 }
 
 function transitionToPolishing(state, tier) {
+    // Save the pair before advancing.
     try {
-        appendPair(PAIRS_PATH, {
+        appendPair(state.pairsPath, {
             input: state.sanitized,
             rewrite: state.parsed.rewrite,
             tier,
             timestamp: Date.now(),
         });
     } catch (err) {
+        // Non-fatal — log and continue.
         state.statusLine = `(pair save failed: ${err.message})`;
     }
 
+    // Build polish blocks.
     const aligned = alignBlocks(state.original, state.sanitized, state.parsed.segments);
     const rewriteBlocks = splitByMarkers(state.parsed.rewrite);
 
@@ -339,14 +390,58 @@ function transitionToPolishing(state, tier) {
     state.phase = STATES.POLISHING;
 }
 
+// LLMs reach for ` — ` (space, em-dash, space) constantly; humans don't,
+// so it's a strong tell. Replace with ellipsis+space, picking the
+// ellipsis variant that matches the active flags the same way
+// replacePerm picks one for `...` substitution.
+function deAiifyEmDashes(text, config) {
+    let ellipsis;
+    if (!config.midline) {
+        ellipsis = '⋯';
+    } else if (config.saveSpace) {
+        ellipsis = '…';
+    } else {
+        ellipsis = '...';
+    }
+    // Strict pattern: ASCII space (or tab), em-dash, ASCII space (or tab).
+    // Newlines are excluded — a structural em-dash on its own line is
+    // legitimate writing, not the LLM tic.
+    return text.replace(/[ \t]—[ \t]/g, `${ellipsis} `);
+}
+
+function normalizeEllipsis(text, config) {
+    let target;
+    if (!config.midline) target = '⋯';
+    else if (config.saveSpace) target = '…';
+    else target = '...';
+    // Normalize all variants to the target.
+    return text
+        .replace(/⋯/g, target)
+        .replace(/…/g, target)
+        .replace(/\.\.\./g, target);
+}
+
 function shipToClipboard(state, config) {
+    // Apply substitutions (hh→♡, -→—, ...→⋯) per block, then stitch
+    // and normalize. Same replacePerm rules as drafting/sanitizing.
     const blocks = state.blocks.map(b => replacePerm(b.edited, config));
     const stitched = stitchBlocks(blocks);
-    const normalized = normalizeStructure(stitched);
+    // Strip the LLM em-dash tic before structural normalization, so the
+    // output stops looking machine-generated at a glance.
+    const desmoothed = deAiifyEmDashes(stitched, config);
+    const normalized = normalizeEllipsis(normalizeStructure(desmoothed), config);
     clipboardy.writeSync(normalized);
-    Object.assign(state, createState());
+    // Always cut+reset: ship to clipboard and return to drafting.
+    // Preserve the mode-specific pairs path across the reset so the
+    // next message saves to the right file.
+    const pairsPath = state.pairsPath;
+    Object.assign(state, createState(pairsPath));
     state.statusLine = '✂ shipped to clipboard, ready to draft';
 }
+
+// ============================================================
+// Main loop
+// ============================================================
 
 function isRunDirectly() {
     if (!process.argv[1]) return false;
@@ -365,7 +460,7 @@ async function main() {
         console.log(HELP_TEXT);
         console.log('\nrewrite.mjs additional flags:');
         console.log('  --rp                   use general-RP prompt instead of ERP');
-        console.log('  --light                edits are less aggressive')
+        console.log('  --light                edits are less aggressive');
         process.exit(0);
     }
 
@@ -389,16 +484,21 @@ async function main() {
         if (parsedArgs.isLight) return 'prompt-light.dat';
         return 'prompt.dat';
     })();
+    // Pairs file is split by RP vs ERP (different writing modes have
+    // different example needs). Light/heavy share the same pool within
+    // a mode since the structural patterns are the same — only the
+    // expansion intensity differs, which the prompt itself controls.
+    const pairsPath = parsedArgs.isRp ? 'pairs-rp.dat' : 'pairs.dat';
     let systemPrompt;
     try {
-        systemPrompt = loadSystemPrompt(promptPath, PAIRS_PATH);
+        systemPrompt = loadSystemPrompt(promptPath, pairsPath);
     } catch (err) {
         console.error(`Failed to load system prompt from ${promptPath}: ${err.message}`);
         process.exit(1);
     }
 
     const client = new Anthropic();
-    const state = createState();
+    const state = createState(pairsPath);
 
     function redraw() {
         switch (state.phase) {
@@ -421,10 +521,12 @@ async function main() {
         if (state.phase === STATES.DRAFTING || state.phase === STATES.SANITIZING) {
             handleTextInput(state, str, key, config);
             checkCommands(state, config);
+            // Async API call from sanitizing phase.
             if (state.phase === STATES.AWAITING) {
                 redraw();
                 try {
                     const { text } = await callClaude(client, systemPrompt, state.sanitized);
+                    // Save raw response for debugging.
                     try {
                         fs.writeFileSync('last-response.txt', text);
                     } catch { /* non-fatal */ }
@@ -477,7 +579,7 @@ function checkCommands(state, config) {
     if (state.phase === STATES.DRAFTING && trimmedBuf.endsWith(':submit\n')) {
         state.buffer = trimmedBuf.replace(/:submit\n$/, '');
         state.cursor = Math.min(state.cursor, state.buffer.length);
-        // apply replacePerm before locking (matches typer ship)
+        // Apply replacePerm before locking original (matches typer ship behavior).
         state.buffer = replacePerm(state.buffer, config);
         state.cursor = state.buffer.length;
         transitionToSanitizing(state);
@@ -513,7 +615,13 @@ function handleReviewInput(state, str, key) {
 
 function handlePolishInput(state, str, key, config) {
     if (state.editingBlock) {
-        // shift/alt+enter or ctrl+j for newline (terminal compat); plain enter exits
+        // Inline editing of the active block. Cursor-aware:
+        // arrows move, home/end jump, backspace deletes before cursor,
+        // regular keys insert at cursor and apply replacePerm so
+        // hh→♡, -→—, ...→⋯ substitutions still work in edits.
+        // Shift+Enter (or Alt+Enter, or Ctrl+J as fallbacks for
+        // terminals that don't forward Shift to readline) inserts a
+        // newline. Plain Enter exits edit mode.
         const block = state.blocks[state.activeBlock];
         const wantsLinebreak = (key.name === 'return' && (key.shift || key.meta))
             || (key.ctrl && key.name === 'j');
@@ -525,6 +633,7 @@ function handlePolishInput(state, str, key, config) {
                 + block.edited.slice(state.editCursor);
             state.editCursor++;
         } else if (key.name === 'return') {
+            // Plain Enter — exit edit mode.
             state.editingBlock = false;
         } else if (key.name === 'left') {
             if (state.editCursor > 0) state.editCursor--;
@@ -541,12 +650,14 @@ function handlePolishInput(state, str, key, config) {
                 state.editCursor--;
             }
         } else if (typeof str === 'string' && !key.ctrl) {
-            // apply replacePerm over surrounding context so 'hh'→♡ works mid-edit
+            // Insert at cursor, then apply replacePerm to the whole text
+            // so substitutions take effect on the surrounding context
+            // (e.g. typing the second 'h' in 'hh' triggers the ♡ swap).
             const before = block.edited.slice(0, state.editCursor);
             const after = block.edited.slice(state.editCursor);
             const inserted = before + str + after;
             const transformed = replacePerm(inserted, config);
-            // cursor: position after (before+str) under replacePerm
+            // Cursor: position equivalent to (before+str) under replacePerm.
             const prefixTransformed = replacePerm(before + str, config);
             block.edited = transformed;
             state.editCursor = prefixTransformed.length;
@@ -557,6 +668,7 @@ function handlePolishInput(state, str, key, config) {
         state.activeBlock = (state.activeBlock + 1) % state.blocks.length;
     } else if (str === 'e') {
         state.editingBlock = true;
+        // Initialize cursor to end of block on entry.
         state.editCursor = state.blocks[state.activeBlock].edited.length;
     } else if (str === 'a') {
         abandon(state);
